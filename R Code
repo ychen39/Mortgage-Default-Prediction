@@ -1,0 +1,134 @@
+#+eval=FALSE
+rm(list = ls()) 
+setwd("C:/Users/Yanbin Chen/Documents/Foundation of DA/homework/Project/Data")
+library(data.table)
+library("dplyr")
+library(ggplot2)
+library(tidyverse)
+library(stargazer)
+library(caTools)
+library("janitor")
+library(dataPreparation)
+library(pROC) # for AUC calculations
+library(PRROC) # for Precision-Recall curve calculations
+
+##Here Not run--It's to load the original data
+svcgclass <- c('character','integer','real','character', 'integer','integer','character', 'character','character','integer','real','real','integer', 'integer', 'character','integer','integer','integer','integer','integer','integer', 'real','real', 'character','character','real')  
+years_list<-c('1999','2000','2001','2002','2003','2004','2005','2006','2007','2008','2009','2010','2011','2012','2013','2014','2015','2016','2017')
+
+datafile<-data.frame()
+
+for (year in years_list){
+  zipname = paste0("sample_", year, ".zip")
+  filename= paste0("sample_svcg_", year, ".txt")
+  dataname<- assign(paste0("sample_", year),read.table(unz(zipname, filename), sep="|", header=FALSE,colClasses=svcgclass))
+  set.seed(100)
+  dataname<-dataname[sample(nrow(dataname), 100000), ]
+  datafile<-rbind(datafile,dataname)
+}
+names(datafile) <- c('id_loan','svcg_cycle','current_upb','delq_sts','loan_age', 'mths_remng', 'repch_flag','flag_mod','cd_zero_bal','dt_zero_bal', 'current_int_rt','non_int_brng_upb','dt_lst_pi','mi_recoveries', 'net_sale_proceeds','non_mi_recoveries','expenses','legal_costs', 'maint_pres_costs','taxes_ins_costs','misc_costs',' actual_loss', 'modcost','stepmod_ind','dpm_ind','eltv') 
+
+write.csv(datafile,'datafile.csv')
+
+#####Run begin here
+datafile<-read.csv('datafile.csv',sep=',',header=TRUE)#datafile is processes mortgage data
+datafile<-datafile[!is.na(datafile$delq_sts), ]
+
+#convert time column to Date format and make it uniform.
+hp_index<-read.table('HPI_PO_monthly_hist.csv',sep=',',header=TRUE)#house price index data
+names(hp_index)[1] <- "svcg_cycle" #"svcg_cycle" means the start date of mortgage
+hp_index["svcg_cycle"] <- lapply(hp_index["svcg_cycle"],as.Date,origin = "1970-01-01")
+hp_index['Year']<-format(hp_index['svcg_cycle'],format='%Y')
+hp_index['svcg_cycle']<-format(hp_index['svcg_cycle'],format='%Y%m')
+
+# Convert 'N'and 'Y' to 0 or 1
+comb_data<-merge(datafile,hp_index,all.x=TRUE,by='svcg_cycle')
+column_lst<-c('repch_flag','flag_mod','stepmod_ind','dpm_ind')
+for (var in column_lst){
+  levels(comb_data[var])[levels(comb_data[var])=='Y']<-'1'
+  levels(comb_data[var])[levels(comb_data[var])=='N']<-'0'
+}
+
+comb_data[comb_data=='']<-NA
+
+#get monthylyunemploment rate
+unemployr<-read.csv('unemploy_file.csv',sep=',',header=TRUE)
+unemployr$Period<-str_remove(unemployr$Period,'M') #make time format uniform--to merge
+unemployr<-unemployr%>%  unite('svcg_cycle',Year:Period)
+unemployr$svcg_cycle<-str_remove(unemployr$svcg_cycle,'_')
+unemployr$svcg_cycle<-str_remove(unemployr$svcg_cycle,'_')
+
+#Select and combine with main dataset
+unemployr_d<-select(unemployr,c('svcg_cycle','Value'),)
+fin_data<-merge(comb_data,unemployr_d,all.x=TRUE,by='svcg_cycle')
+fin_data<-fin_data%>%mutate_if(is.character,as.numeric)%>%mutate_if(is.factor,as.numeric)
+
+# If delinquency over 3 months,it is defaulted
+fin_data['default_sts']<-ifelse((fin_data['delq_sts'] =='R'),1,ifelse((fin_data['delq_sts']>=3),1,0))
+fin_data<-fin_data[!(fin_data['delq_sts'] =='XX'),]
+Data<-select(fin_data,c('default_sts','svcg_cycle','current_upb','loan_age','mths_remng','current_int_rt','non_int_brng_upb',"USA...SA.",'Value'),)
+names(Data)[9] <- 'UnemplyR'
+names(Data)[8] <- 'HousePInd'
+names(Data)[2] <- 'YearMonth'
+
+#Calculate the proportion of NA,default
+Data %>%summarize_all(funs(sum(is.na(.)) / length(.)))
+Data %>%summarize ((sum(Data['default_sts']==1) / nrow(Data['default_sts'])))
+Data<-Data%>%mutate(loan_age2=loan_age^2)
+
+
+#Create train_data and test_data
+set.seed(100)
+split <- sample.split(Data$default_sts, SplitRatio = 0.75)
+train <- subset(Data, split == TRUE)
+test <- subset(Data, split == FALSE)
+
+# standardize test data with in-sample mean & sd
+scales <- build_scales(dataSet = train, cols = c("current_upb", "loan_age","mths_remng","current_int_rt","non_int_brng_upb","HousePInd","UnemplyR",'loan_age2'), verbose = TRUE)
+train <- fastScale(dataSet = train, scales = scales, verbose = TRUE)
+test <- fastScale(dataSet = test, scales = scales, verbose = TRUE)
+Data <- fastScale(dataSet = Data, scales = scales, verbose = TRUE)
+Data$default_sts<-as.factor(Data$default_sts)
+write.csv(train,'train_Data.csv')
+write.csv(test,'test_Data.csv')
+write.csv(Data,'final_Data.csv')
+
+#balance the dataset
+as.data.frame(table(train$default_sts))
+library(DMwR)
+train$default_sts<-as.factor(train$default_sts)
+balanced.data <- SMOTE(default_sts ~., train,perc.over = 200, perc.under = 200)#now freq is 0:94672;1:71004
+as.data.frame(table(balanced.data$default_sts))
+write.csv(balanced.data,'train_Data.csv')
+
+###Run model
+#Random Forest--First find the best mtry,and then decide ntree
+library(randomForest)
+train$YearMonth<-as.factor(train$YearMonth)
+test$YearMonth<-as.factor(test$YearMonth)
+err<-as.numeric()
+for (i in 1:(length(names(train))-1)){
+  mtry_test<-randomForest(default_sts~.-YearMonth,data=balanced.data,mtry=i)
+  err<-append(err,mean(mtry_test$err.rate))
+}
+mtry<-which.min(err)
+
+ntree_fit<-randomForest(default_sts~.-YearMonth,data=balanced.data,mtry=mtry)
+plot(ntree_fit)
+
+rf1 <- randomForest(default_sts ~ ., balanced.data, mtry=mtry,ntree=500, norm.votes=FALSE, do.trace=10,importance=TRUE)
+rf.combined <- combine(rf1,rf2)
+rf2 <- randomForest(default_sts ~ ., balanced.data, mtry=mtry,ntree=500,importance=TRUE)
+
+
+
+auc <- roc(test$default_sts, pred)
+print(auc)
+
+sdf<-fin_data %>%summarize_all(funs(sum(is.na(.))))
+sdf<-t(data.frame(sdf))
+stargazer(Data,type='text',out='summary_table.html')
+write.csv(sdf,'nof_na.csv',sep='')
+
+
+
