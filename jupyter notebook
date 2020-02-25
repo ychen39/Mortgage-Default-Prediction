@@ -1,0 +1,131 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score
+from sklearn.metrics import classification_report
+from sklearn.metrics import  confusion_matrix
+from sklearn.metrics import roc_auc_score
+#Import libraries for random forest
+from sklearn.ensemble import RandomForestClassifier
+
+#load dataset
+Data=pd.read_csv('final_Data.csv',sep=',',header=0)
+Data=Data.iloc[:,1:]
+train=pd.read_csv('train_Data.csv',sep=',',header=0).iloc[:,1:]
+test=pd.read_csv('test_Data.csv',sep=',',header=0).iloc[:,1:]
+
+#process the data
+train.YearMonth=pd.factorize(train.YearMonth)[0]
+test.YearMonth=pd.factorize(test.YearMonth)[0]
+X_train=train.iloc[:,2:-1]
+y_train=train.iloc[:,0]
+X_test=test.iloc[:,2:-1]
+y_test=test.iloc[:,0]
+X=Data.iloc[:,2:]
+y=Data.iloc[:,0] 
+
+##KNN
+from sklearn.neighbors import KNeighborsClassifier
+##compare error rate for different K
+#K values between 1 and 40
+error=[]
+auc=[]
+
+for i in range(1,40):
+    knn=KNeighborsClassifier(n_neighbors=i)
+    knn.fit(X_train,y_train)
+    pred_i=knn.predict(X_test)
+    error.append(classification_report(y_test,pred_i))
+    auc.append(roc_auc_score(y_test, pred_i))
+    
+# Find the optimal K with highest AUC score
+print(auc.index(max(auc)))
+max(auc) #Highest AUC score in KNN model
+
+#Use optimal K=18 to run KNN
+classifier = KNeighborsClassifier(n_neighbors=38)
+classifier.fit(X_train, y_train)
+y_pred = classifier.predict(X_test)
+
+#print confusion matrix & f1 score for optimal K=18
+confusion=confusion_matrix(y_test,y_pred)
+print(classification_report(y_test,y_pred))
+print(confusion)
+# True Positives
+TP = confusion[1, 1]
+# True Negatives
+TN = confusion[0, 0]
+# False Positives
+FP = confusion[0, 1]
+# False Negatives
+FN = confusion[1, 0]
+# calculate the sensitivity
+conf_sensitivity = (TP / float(TP + FN))
+print(conf_sensitivity) #Test to correctly identify those with the outcome (true positive rate)
+
+
+###Random Forest
+rf=RandomForestClassifier(n_estimators=1800,max_features=3,oob_score=True,random_state=1,n_jobs=-1)
+#Train the model on training data
+rf.fit(X_train,y_train )
+#predict the test set
+rf_pred=rf.predict(X_test)
+print('AUC Score is'+ str(roc_auc_score(y_test,rf_pred)))
+print(classification_report(y_test,rf_pred))
+
+#Use randomsearch to optimize
+from sklearn.model_selection import RandomizedSearchCV
+n_estimators=[int(x) for x in np.linspace(start=200,stop=2000,num=10)]
+max_features=['auto','sqrt']
+random_grid={'n_estimators':n_estimators,'max_features':max_features}
+rf_search=RandomizedSearchCV(estimator=rf,param_distributions=random_grid,n_iter=10,cv=3,verbose=2,random_state=0)
+#fit the model
+rf_search.fit(X_train,y_train)
+print(rf_search.best_params_)
+
+#Plot feature importance
+# feat_importances = pd.Series(rf.feature_importances_, index=X_test.columns)
+# feat_importances.plot(kind='barh')
+
+#
+y_pos = np.arange(len(X_test.columns))
+performance = rf.feature_importances_
+
+plt.barh(y_pos, performance, align='center', alpha=0.5)
+plt.yticks(y_pos, X_test.columns)
+plt.xlabel('Features')
+plt.title('Feature Importance')
+
+plt.show()
+plt.savefig('Feature Importance.png')
+
+#Use Recursive Feature Elimination to choose features
+from sklearn.feature_selection import RFE
+from sklearn.linear_model import LogisticRegression
+logreg = LogisticRegression()
+rfe = RFE(logreg, 20)
+rfe = rfe.fit(X_train, y_train.values.ravel())
+print(rfe.support_)
+print(rfe.ranking_)
+
+
+#Run Logistic Regression &predict
+logreg.fit(X_train, y_train)
+y_pred_log = logreg.predict(X_test)
+
+print('Accuracy of logistic regression classifier on test set: {:.2f}'.format(logreg.score(X_test, y_test)))
+print('AUC Score of Logistic Regression classifier on test set: '+str(roc_auc_score(y_test,y_pred_log)))
+print(classification_report(y_test,y_pred_log))
+
+import statsmodels.api as sm
+logit_model=sm.Logit(y_train,X_train)
+result=logit_model.fit()
+print(result.summary2())
+
+y_logpred=result.predict(X_test)
+print('AUC Score of Logistic Regression classifier on test set: '+str(roc_auc_score(y_test,y_logpred)))
+print(classification_report(y_test,y_pred_log))
+
+f = open('csvfile.csv','w')
+f.write(result.summary().as_csv())
+f.close()
